@@ -418,8 +418,15 @@ resource "aws_ecs_cluster" "cluster" {
   }
 }
 
+# Bugfix: this previously hardcoded ECS_CLUSTER=ecs-lab-cluster (no suffix),
+# so any EC2 launched by the "fix" stack's ASG joined the *original*
+# unsuffixed cluster instead of its own - discovered when the patched stack's
+# task failed to place ("No Container Instances were found").
 data "template_file" "user_data" {
   template = file("${path.module}/resources/ecs/user_data.tpl")
+  vars = {
+    ecs_cluster_name = aws_ecs_cluster.cluster.name
+  }
 }
 
 resource "aws_ecs_task_definition" "task_definition" {
