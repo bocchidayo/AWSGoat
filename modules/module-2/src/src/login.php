@@ -6,20 +6,33 @@ session_start();
 
 error_reporting(0);
 
-if (isset($_GET['organization'])) {
-	$oidres = mysqli_query($conn,"SELECT organization_id from organizations where organization = '{$_GET['organization']}'");
-	$oidq = mysqli_fetch_assoc($oidres);
-	$oid = $oidq['organization_id'];
-	$_SESSION['organization_id'] = $oid; 
+// Remediation (RT-03): the organization switch previously ran unauthenticated
+// (no session check at all) and concatenated $_GET['organization'] directly
+// into SQL, then redirected straight into the superadmin panel. It now
+// requires an existing authenticated superadmin session and uses a
+// parameterized query.
+if (isset($_GET['organization']) && isset($_SESSION['username']) && ($_SESSION['isadmin'] ?? null) == 2) {
+	$stmt = $conn->prepare("SELECT organization_id FROM organizations WHERE organization = ? LIMIT 1");
+	$stmt->bind_param("s", $_GET['organization']);
+	$stmt->execute();
+	$oidq = $stmt->get_result()->fetch_assoc();
+	if ($oidq) {
+		$_SESSION['organization_id'] = $oidq['organization_id'];
+	}
     header("Location: ./superadmin/superadmin-index.php");
+    exit;
 }
 
 if (isset($_POST['submit'])) {
 	$email = $_POST['email'];
 	$password = md5($_POST['password']);
 
-	$sql = "SELECT * FROM users WHERE email='$email' AND password='$password' LIMIT 1";
-	$result = mysqli_query($conn, $sql);
+	// Remediation (RT-03): parameterized query, no more string concatenation
+	// of user input into SQL (this was the login SQL-injection auth bypass).
+	$stmt = $conn->prepare("SELECT * FROM users WHERE email = ? AND password = ? LIMIT 1");
+	$stmt->bind_param("ss", $email, $password);
+	$stmt->execute();
+	$result = $stmt->get_result();
 	if ($result->num_rows > 0) {
 		$row = mysqli_fetch_assoc($result);
 		$_SESSION['username'] = $row['username'];
@@ -27,7 +40,7 @@ if (isset($_POST['submit'])) {
 		$_SESSION['isadmin']  = $row['isadmin'];
 		$isadmin = $row['isadmin'];
 		$_SESSION['organization_id'] = $row['organization_id'];
-		
+
 		if($result->num_rows > 1){
 			while($row = $result->fetch_assoc()){
 				$_SESSION['username'] = $row['username'];
@@ -37,16 +50,18 @@ if (isset($_POST['submit'])) {
 				$_SESSION['organization_id'] = $row['organization_id'];
 			}
 		}
-		if ($isadmin == 0)
+		if ($isadmin == 0) {
 			header("Location: ./user/index.php");
-		else if($isadmin == 1){
+			exit;
+		} else if($isadmin == 1){
 			header("Location: ./admin/admin-index.php");
-		}
-		else if($isadmin == 2){
+			exit;
+		} else if($isadmin == 2){
 			$_SESSION['organization_id'] = 1;
 			header("Location: ./superadmin/superadmin-index.php");
+			exit;
 		}
-	} 
+	}
 	else {
 		echo "<script>alert('Email or Password is Wrong.')</script>";
 	}

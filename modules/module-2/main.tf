@@ -4,6 +4,10 @@ terraform {
       source  = "hashicorp/aws"
       version = "~> 3.27"
     }
+    random = {
+      source  = "hashicorp/random"
+      version = "~> 3.5"
+    }
   }
 }
 
@@ -12,6 +16,14 @@ provider "aws" {
 }
 
 data "aws_caller_identity" "current" {}
+data "aws_region" "current" {}
+
+# Remediation: RDS master password is generated at apply time instead of being
+# hardcoded in source. It is stored only in Terraform state and in Secrets Manager.
+resource "random_password" "rds_master" {
+  length  = 24
+  special = false
+}
 
 data "aws_availability_zones" "available" {
   state = "available"
@@ -135,7 +147,7 @@ resource "aws_db_instance" "database-instance" {
   engine                 = "mysql"
   engine_version         = "8.0"
   username               = "root"
-  password               = "T2kVB3zgeN3YbrKS"
+  password               = random_password.rds_master.result
   parameter_group_name   = "default.mysql8.0"
   skip_final_snapshot    = true
   availability_zone      = "us-east-1a"
@@ -326,9 +338,22 @@ resource "aws_iam_role_policy_attachment" "ecs-task-role-attachment" {
   role       = aws_iam_role.ecs-task-role.name
   policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
 }
-resource "aws_iam_role_policy_attachment" "ecs-task-role-attachment-2" {
-  role       = aws_iam_role.ecs-task-role.name
-  policy_arn = "arn:aws:iam::aws:policy/SecretsManagerReadWrite"
+# Remediation (RT-01): the task role previously had the AWS-managed
+# `SecretsManagerReadWrite` policy attached, which grants read/write on every
+# secret in the account. The application only ever needs to read its own DB
+# credential secret at container startup, so this is replaced with an inline
+# policy scoped to that single resource and to the read-only action.
+resource "aws_iam_role_policy" "ecs-task-role-secrets-scoped" {
+  name = "rds-creds-read-only"
+  role = aws_iam_role.ecs-task-role.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect   = "Allow"
+      Action   = ["secretsmanager:GetSecretValue"]
+      Resource = [aws_secretsmanager_secret.rds_creds.arn]
+    }]
+  })
 }
 
 resource "aws_iam_role_policy_attachment" "ecs-instance-role-attachment-ssm" {
@@ -395,22 +420,20 @@ resource "aws_ecs_task_definition" "task_definition" {
   cpu                      = "512"
   requires_compatibilities = ["EC2"]
   task_role_arn            = aws_iam_role.ecs-task-role.arn
+  execution_role_arn       = aws_iam_role.ecs-task-role.arn
 
-  pid_mode = "host"
-  volume {
-    name      = "modules"
-    host_path = "/lib/modules"
-  }
-  volume {
-    name      = "kernels"
-    host_path = "/usr/src/kernels"
-  }
+  # Remediation (RT-04 hardening): the previous definition set pid_mode="host"
+  # and mounted host kernel module directories into the container, with the
+  # SYS_PTRACE capability added in the container definition. None of this is
+  # needed by a PHP/Apache app and it is a well-known container-escape vector
+  # (ptrace against host processes visible via a shared PID namespace). Removed.
 }
 
 data "template_file" "task_definition_json" {
   template = file("${path.module}/resources/ecs/task_definition.json")
   depends_on = [
-    null_resource.rds_endpoint
+    null_resource.rds_endpoint,
+    null_resource.build_and_push_image
   ]
 }
 
@@ -473,13 +496,54 @@ resource "aws_secretsmanager_secret" "rds_creds" {
 }
 
 resource "aws_secretsmanager_secret_version" "secret_version" {
-  secret_id     = aws_secretsmanager_secret.rds_creds.id
-  secret_string = <<EOF
-   {
-    "username": "root",
-    "password": "T2kVB3zgeN3YbrKS"
-   }
+  secret_id = aws_secretsmanager_secret.rds_creds.id
+  secret_string = jsonencode({
+    username = "root"
+    password = random_password.rds_master.result
+  })
+}
+
+resource "aws_cloudwatch_log_group" "app" {
+  name              = "/ecs/aws-goat-m2"
+  retention_in_days = 14
+}
+
+# Remediation (RT-04): the running task previously pulled a public, unpatched
+# image (public.ecr.aws/p3q0v3y2/aws-goat-m2). Editing the Dockerfile/PHP
+# source alone would have no effect on what is actually deployed, so a
+# private ECR repo is created and the patched image (SQLi fix, upload
+# validation, authenticated document downloads, sudoers rule removed) is
+# built and pushed from wherever `terraform apply` runs (this matches the
+# existing GitHub Actions workflow, whose ubuntu-latest runner ships Docker).
+resource "aws_ecr_repository" "app" {
+  name                 = "aws-goat-m2"
+  image_tag_mutability = "MUTABLE"
+
+  provisioner "local-exec" {
+    when        = destroy
+    command     = "aws ecr batch-delete-image --repository-name ${self.name} --region us-east-1 --image-ids imageTag=latest || true"
+    interpreter = ["/bin/bash", "-c"]
+  }
+}
+
+resource "null_resource" "build_and_push_image" {
+  triggers = {
+    src_hash = sha1(join("", [for f in fileset("${path.module}/src/src", "**") : filesha1("${path.module}/src/src/${f}")]))
+    dockerfile_hash = filesha1("${path.module}/src/Dockerfile")
+  }
+
+  provisioner "local-exec" {
+    command     = <<EOF
+set -euo pipefail
+REGISTRY="${data.aws_caller_identity.current.account_id}.dkr.ecr.${data.aws_region.current.name}.amazonaws.com"
+aws ecr get-login-password --region ${data.aws_region.current.name} | docker login --username AWS --password-stdin "$REGISTRY"
+docker build -t "$REGISTRY/${aws_ecr_repository.app.name}:latest" ${path.module}/src
+docker push "$REGISTRY/${aws_ecr_repository.app.name}:latest"
 EOF
+    interpreter = ["/bin/bash", "-c"]
+  }
+
+  depends_on = [aws_ecr_repository.app]
 }
 
 resource "null_resource" "rds_endpoint" {
@@ -487,13 +551,16 @@ resource "null_resource" "rds_endpoint" {
     command     = <<EOF
 RDS_URL="${aws_db_instance.database-instance.endpoint}"
 RDS_URL=$${RDS_URL::-5}
+IMAGE_URI="${data.aws_caller_identity.current.account_id}.dkr.ecr.${data.aws_region.current.name}.amazonaws.com/${aws_ecr_repository.app.name}:latest"
 sed -i "s,RDS_ENDPOINT_VALUE,$RDS_URL,g" ${path.module}/resources/ecs/task_definition.json
+sed -i "s,ECS_IMAGE_VALUE,$IMAGE_URI,g" ${path.module}/resources/ecs/task_definition.json
+sed -i "s,RDS_SECRET_ARN_VALUE,${aws_secretsmanager_secret.rds_creds.arn},g" ${path.module}/resources/ecs/task_definition.json
 EOF
     interpreter = ["/bin/bash", "-c"]
   }
 
   depends_on = [
-    aws_db_instance.database-instance
+    aws_db_instance.database-instance, null_resource.build_and_push_image, aws_secretsmanager_secret_version.secret_version
   ]
 }
 
@@ -502,7 +569,10 @@ resource "null_resource" "cleanup" {
     command     = <<EOF
 RDS_URL="${aws_db_instance.database-instance.endpoint}"
 RDS_URL=$${RDS_URL::-5}
+IMAGE_URI="${data.aws_caller_identity.current.account_id}.dkr.ecr.${data.aws_region.current.name}.amazonaws.com/${aws_ecr_repository.app.name}:latest"
 sed -i "s,$RDS_URL,RDS_ENDPOINT_VALUE,g" ${path.module}/resources/ecs/task_definition.json
+sed -i "s,$IMAGE_URI,ECS_IMAGE_VALUE,g" ${path.module}/resources/ecs/task_definition.json
+sed -i "s,${aws_secretsmanager_secret.rds_creds.arn},RDS_SECRET_ARN_VALUE,g" ${path.module}/resources/ecs/task_definition.json
 EOF
     interpreter = ["/bin/bash", "-c"]
   }

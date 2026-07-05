@@ -342,7 +342,7 @@ if (isset($_POST['submit'])) {
                                                     <td>" . $remrow["type"] . "</td>
                                                     <td>" . $remrow["filed_on"] . "</td>
                                                     <td>" . $remrow["amount"] . "</td>
-                                                    <td> <a href=" . $remrow["file"] . " target='_blank'>
+                                                    <td> <a href=\"../download.php?f=" . urlencode($remrow["file"]) . "\" target='_blank'>
                                                     <button class='btn btn-primary' type='button'>View File</button></a> </td>
                                                     <td>" . $remrow["status"] . "</td>";
                                                 echo "<td>

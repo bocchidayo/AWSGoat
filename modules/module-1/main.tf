@@ -4,6 +4,10 @@ terraform {
       source  = "hashicorp/aws"
       version = "~> 5.24.0"
     }
+    random = {
+      source  = "hashicorp/random"
+      version = "~> 3.5"
+    }
   }
 }
 provider "aws" {
@@ -11,6 +15,15 @@ provider "aws" {
 }
 
 data "aws_caller_identity" "current" {}
+
+# Remediation (RT-hardcoded-secret): the JWT signing secret used to be a
+# literal string committed to this file, readable by anyone with repo access
+# and baked in plaintext into the Lambda's environment. It is now generated
+# at apply time and lives only in Terraform state and the Lambda's env var.
+resource "random_password" "jwt_secret" {
+  length  = 48
+  special = true
+}
 
 
 data "archive_file" "lambda_zip" {
@@ -3161,7 +3174,7 @@ resource "aws_lambda_function" "lambda_ba_data" {
   memory_size   = "256"
   environment {
     variables = {
-      JWT_SECRET = "T2BYL6#]zc>Byuzu"
+      JWT_SECRET = random_password.jwt_secret.result
     }
   }
 }
@@ -3415,15 +3428,16 @@ resource "aws_s3_object" "upload_folder_dev" {
   depends_on   = [aws_s3_bucket.dev, null_resource.file_replacement_ec2_ip, aws_s3_bucket_acl.dev]
 }
 
-resource "aws_s3_object" "upload_folder_dev_2" {
-  for_each     = fileset("./resources/s3/shared/", "**")
-  bucket       = aws_s3_bucket.dev.bucket
-  key          = each.value
-  acl          = "public-read"
-  source       = "./resources/s3/shared/${each.value}"
-  content_type = lookup(local.content_type_map, regex("\\.(?P<extension>[A-Za-z0-9]+)$", each.value).extension, "application/octet-stream")
-  depends_on   = [aws_s3_bucket.dev, null_resource.file_replacement_ec2_ip, aws_s3_bucket_acl.dev]
-}
+# Remediation (RT-06): this used to publish the entire ./resources/s3/shared
+# tree - including real-looking SSH private keys for eight "employees" and
+# the goat_instance SSH client config with its public IP - to the public
+# "dev" bucket (block_public_acls=false, bucket policy grants Principal "*").
+# Anyone on the internet could list and download every private key with no
+# authentication. The legitimate SSH bootstrap for goat_instance already has
+# its own dedicated, self-deleting temporary bucket (see aws_instance
+# "goat_instance" / goat_user_data.tpl) that only ever copies the one public
+# key it needs and tears itself down afterwards - this permanent, public
+# mirror of every key serves no purpose and is removed outright.
 
 
 /* Creating a S3 Bucket for ec2-files upload. */
@@ -3778,7 +3792,7 @@ EOF
     interpreter = ["/bin/bash", "-c"]
   }
   depends_on = [
-    aws_s3_object.upload_temp_object, aws_s3_object.upload_temp_object_2, aws_s3_object.upload_folder_dev, aws_s3_object.upload_folder_dev_2, aws_s3_object.upload_folder_prod
+    aws_s3_object.upload_temp_object, aws_s3_object.upload_temp_object_2, aws_s3_object.upload_folder_dev, aws_s3_object.upload_folder_prod
   ]
 }
 

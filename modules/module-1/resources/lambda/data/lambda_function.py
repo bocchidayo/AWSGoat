@@ -21,8 +21,36 @@ def generateResponse(statusCode, body):
 
 
 def download_url(url):
+    # Remediation (SSRF): the URL used to be fetched with no validation at
+    # all, letting an authenticated user make the Lambda request arbitrary
+    # internal/link-local addresses (e.g. the instance metadata endpoint) and
+    # exfiltrate the response through the resulting S3 object. Only plain
+    # http(s) URLs resolving to a public address are now allowed.
+    import ipaddress
+    import socket
+
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        raise ValueError("Unsupported URL")
+
+    try:
+        resolved_ips = socket.getaddrinfo(parsed.hostname, None)
+    except socket.gaierror:
+        raise ValueError("Could not resolve host")
+
+    for family, _, _, _, sockaddr in resolved_ips:
+        ip = ipaddress.ip_address(sockaddr[0])
+        if (
+            ip.is_private
+            or ip.is_loopback
+            or ip.is_link_local
+            or ip.is_multicast
+            or ip.is_reserved
+        ):
+            raise ValueError("Requests to internal/link-local addresses are not allowed")
+
     req = urllib.request.Request(url, headers={"User-Agent": "Magic Browser"})
-    image = urllib.request.urlopen(req).read()
+    image = urllib.request.urlopen(req, timeout=5).read()
 
     return image
 
@@ -59,39 +87,35 @@ def generate_auth(userInfo):
         return None
 
 
-def auth_is_valid(event):
-    JWT_SECRET = ""
+def get_auth_claims(event):
+    # Remediation (broken access control): every privileged endpoint below
+    # used to trust an "authLevel" (and sometimes "email"/"id") field taken
+    # straight from the client-supplied request body - any self-registered
+    # user (default authLevel "200") could simply send authLevel="0" and act
+    # as an administrator, ban/delete/promote any user, or reset anyone's
+    # password. Authorization now always comes from the claims embedded in
+    # the signed JWT (set once, server-side, at login) instead.
+    JWT_SECRET = os.environ["JWT_SECRET"]
+    token = None
     if "JWT_TOKEN" in event["headers"]:
-        JWT_TOKEN = event["headers"]["JWT_TOKEN"]
-        JWT_SECRET = os.environ["JWT_SECRET"]
-
-        try:
-            decode_token = jwt.decode(JWT_TOKEN, JWT_SECRET, algorithms=["HS256"])
-            print("Token is still valid and active")
-            return True
-        except jwt.ExpiredSignatureError:
-            print("Token expired. Get new one")
-            return False
-        except jwt.InvalidTokenError as e:
-            print("Invalid Token")
-            return False
+        token = event["headers"]["JWT_TOKEN"]
     elif "jwt_token" in event["headers"]:
-        JWT_TOKEN = event["headers"]["jwt_token"]
-        JWT_SECRET = os.environ["JWT_SECRET"]
-
-        try:
-            decode_token = jwt.decode(JWT_TOKEN, JWT_SECRET, algorithms=["HS256"])
-            print("Token is still valid and active")
-            return True
-        except jwt.ExpiredSignatureError:
-            print("Token expired. Get new one")
-            return False
-        except jwt.InvalidTokenError as e:
-            print("Invalid Token")
-            return False
+        token = event["headers"]["jwt_token"]
     else:
-        print("returning false authentication")
-        return False
+        return None
+
+    try:
+        return jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
+    except jwt.ExpiredSignatureError:
+        print("Token expired. Get new one")
+        return None
+    except jwt.InvalidTokenError:
+        print("Invalid Token")
+        return None
+
+
+def auth_is_valid(event):
+    return get_auth_claims(event) is not None
 
 
 def lambda_handler(event, context):
@@ -104,25 +128,10 @@ def lambda_handler(event, context):
     dbUserTable = dynamodb.Table(userTable)
     dbPostTable = dynamodb.Table(postsTable)
 
-    if event["path"] == "/dump":
-
-        response = dbUserTable.scan()
-        userItems = response["Items"]
-
-        while "LastEvaluatedKey" in response:
-            response = dbUserTable.scan(ExclusiveStartKey=response["LastEvaluatedKey"])
-            userItems.extend(response["Items"])
-
-        response = dbPostTable.scan()
-        postItems = response["Items"]
-
-        while "LastEvaluatedKey" in response:
-            response = dbPostTable.scan(ExclusiveStartKey=response["LastEvaluatedKey"])
-            postItems.extend(response["Items"])
-
-        responses = userItems + postItems
-
-        return generateResponse(200, json.dumps(responses))
+    # Remediation: "/dump" used to return the full users table (bcrypt
+    # hashes, password-reset secret question/answer) and the full posts
+    # table with zero authentication. There is no legitimate product use
+    # case for this route, so it is removed entirely rather than gated.
 
     if event["httpMethod"] == "POST" and event["path"] == "/register":
         data = json.loads(event["body"])
@@ -286,10 +295,19 @@ def lambda_handler(event, context):
                     items.remove(item)
 
             return generateResponse(200, json.dumps({"body": items}))
+
+        # Remediation (broken access control): authLevel/email used to come
+        # straight from the request body, so any anonymous caller could pass
+        # authLevel="0" and see every post regardless of status. This view
+        # (non-null body) is the privileged one, so it now requires a valid
+        # session and takes authLevel/email from the verified JWT.
+        claims = get_auth_claims(event)
+        if claims is None:
+            return generateResponse(401, json.dumps({"body": "Invalid Authorization"}))
         data = json.loads(event["body"])
-        authLevel = data["authLevel"]
+        authLevel = claims.get("authLevel")
         postStatus = data["postStatus"]
-        email = data["email"]
+        email = claims.get("email")
 
         response = dbPostTable.scan()
         items = response["Items"]
@@ -324,12 +342,25 @@ def lambda_handler(event, context):
 
         return generateResponse(200, json.dumps({"body": responses}))
 
-    if auth_is_valid(event):
+    claims = get_auth_claims(event)
+    if claims is not None:
+        callerAuthLevel = claims.get("authLevel")
+        callerEmail = claims.get("email")
+        callerId = claims.get("id")
 
         if event["httpMethod"] == "POST" and event["path"] == "/change-password":
             data = json.loads(event["body"])
 
             id = data["id"].strip()
+
+            # Remediation (broken access control): "id" used to be trusted
+            # straight from the request body with no ownership check at all,
+            # and ids are small sequential integers - any authenticated user
+            # (including a freshly self-registered one) could reset any other
+            # user's password, including an administrator's. Only the
+            # caller's own id is allowed unless the caller is an admin.
+            if id != str(callerId) and callerAuthLevel != "0":
+                return generateResponse(403, json.dumps({"body": "Forbidden"}))
 
             if "newPassword" not in data or "confirmNewPassword" not in data:
                 responses = "New password & Confirm new password are mandatory"
@@ -379,12 +410,12 @@ def lambda_handler(event, context):
         elif event["httpMethod"] == "POST" and event["path"] == "/ban-user":
             data = json.loads(event["body"])
 
-            if "name" not in data or "authLevel" not in data or "email" not in data:
+            if "name" not in data or "email" not in data:
                 responses = "Something is missing. Please check proper authentication"
                 return generateResponse(200, json.dumps({"body": responses}))
 
             name = data["name"]
-            authLevel = data["authLevel"]
+            authLevel = callerAuthLevel
             email = data["email"]
 
             if authLevel != "0":
@@ -416,12 +447,12 @@ def lambda_handler(event, context):
         elif event["httpMethod"] == "POST" and event["path"] == "/unban-user":
             data = json.loads(event["body"])
 
-            if "name" not in data or "authLevel" not in data or "email" not in data:
+            if "name" not in data or "email" not in data:
                 responses = "Something is missing. Please check proper authentication"
                 return generateResponse(200, json.dumps({"body": responses}))
 
             name = data["name"]
-            authLevel = data["authLevel"]
+            authLevel = callerAuthLevel
             email = data["email"]
 
             if authLevel != "0":
@@ -464,10 +495,9 @@ def lambda_handler(event, context):
 
             return generateResponse(200, json.dumps({"body": responses}))
 
-        elif event["httpMethod"] == "POST" and event["path"] == "/xss":
-            data = json.loads(event["body"])
-            responses = data["scriptValue"]
-            return generateResponse(200, json.dumps({"body": responses}))
+        # Remediation: "/xss" was a debug endpoint that reflected
+        # "scriptValue" back verbatim with no encoding - a stored/reflected
+        # XSS sink with no product purpose. Removed.
 
         elif event["path"] == "/save-content":
             bucket = "replace-bucket-name"
@@ -484,7 +514,10 @@ def lambda_handler(event, context):
                 # Download from url as base64 and upload to s3
                 img_data = event["queryStringParameters"]["value"]
                 print(img_data)
-                responses = upload_file(img_data, bucket, True)
+                try:
+                    responses = upload_file(img_data, bucket, True)
+                except ValueError as e:
+                    return generateResponse(400, json.dumps({"body": str(e)}))
                 return generateResponse(200, json.dumps({"body": responses}))
             else:
                 return generateResponse(200, json.dumps({"body": responses}))
@@ -493,11 +526,11 @@ def lambda_handler(event, context):
 
             client = boto3.client("dynamodb")
             data = json.loads(event["body"])
-            if "value" not in data or "authLevel" not in data:
+            if "value" not in data:
                 responses = "Something is missing. Please check proper authentication"
                 return generateResponse(200, json.dumps({"body": responses}))
             name = data["value"]
-            authLevel = data["authLevel"]
+            authLevel = callerAuthLevel
             try:
                 if authLevel == "200":
                     exec_statement = (
@@ -556,10 +589,7 @@ def lambda_handler(event, context):
             print("inside get-users level")
             client = boto3.client("dynamodb")
             data = json.loads(event["body"])
-            if "authLevel" not in data:
-                responses = "Something is missing. Please check proper authentication"
-                return generateResponse(200, json.dumps({"body": responses}))
-            authLevel = data["authLevel"]
+            authLevel = callerAuthLevel
             print("got auth level")
             try:
                 if authLevel == "200":
@@ -610,11 +640,11 @@ def lambda_handler(event, context):
         elif event["httpMethod"] == "POST" and event["path"] == "/delete-user":
             data = json.loads(event["body"])
 
-            if "authLevel" not in data or "email" not in data:
+            if "email" not in data:
                 responses = "Something is missing. Please check proper authentication"
                 return generateResponse(200, json.dumps({"body": responses}))
 
-            authLevel = data["authLevel"]
+            authLevel = callerAuthLevel
             email = data["email"]
 
             if authLevel != "0":
@@ -638,14 +668,13 @@ def lambda_handler(event, context):
             data = json.loads(event["body"])
 
             if (
-                "authLevel" not in data
-                or "email" not in data
+                "email" not in data
                 or "userAuthLevel" not in data
             ):
                 responses = "Something is missing. Please check proper authentication"
                 return generateResponse(200, json.dumps({"body": responses}))
 
-            authLevel = data["authLevel"]
+            authLevel = callerAuthLevel
             email = data["email"]
             userAuthLevel = data["userAuthLevel"].strip()
 
@@ -682,11 +711,11 @@ def lambda_handler(event, context):
         elif event["httpMethod"] == "POST" and event["path"] == "/modify-post-status":
             data = json.loads(event["body"])
 
-            if "authLevel" not in data or "postStatus" not in data or "id" not in data:
+            if "postStatus" not in data or "id" not in data:
                 responses = "Something is missing. Please check proper authentication"
                 return generateResponse(200, json.dumps({"body": responses}))
 
-            authLevel = data["authLevel"]
+            authLevel = callerAuthLevel
             id = data["id"]
             postStatus = data["postStatus"].lower().strip()
 

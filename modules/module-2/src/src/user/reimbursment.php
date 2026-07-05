@@ -75,18 +75,17 @@ if (isset($_POST['submit'])) {
     header('Location: leave-application.php');
     exit;
 } else if (isset($_REQUEST['request'])) {
-    $file_type=$_FILES['file']['type'];
-    if($file_type=="application/pdf" || $file_type=="image/png" || $file_type=="image/jpeg" || $file_type=="image/jpg"){
+    // Remediation (RT-04): the previous check trusted $_FILES['file']['type'],
+    // which is a client-supplied header - trivial to spoof to "image/png"
+    // while uploading a .php file. safe_upload_filename() validates the
+    // actual file content instead.
+    {
         if( $_FILES['file']['name'] != "" ) {
-            $currentDirectory = getcwd();
-            $uploadDirectory = "/documents/reimbursments/" ;
-    
-            $salt = rand(1, 999999);
-            $temp= explode('.',$_FILES['file']['name']);
-            $extension = end($temp);
-            $fileName = bin2hex("$salt" . $_FILES['file']['name']) . "." . "$extension";
-           
-            $uploadPath = $_SERVER['DOCUMENT_ROOT'] .  $uploadDirectory .  basename($fileName);
+            $fileName = safe_upload_filename($_FILES['file']['tmp_name']);
+            if ($fileName === false) {
+                die("Unsupported file type!");
+            }
+            $uploadPath = "/var/www/documents/reimbursments/" . $fileName;
             move_uploaded_file( $_FILES['file']['tmp_name'],$uploadPath) or die( "Could not copy file!");
         }
         else {
@@ -95,7 +94,7 @@ if (isset($_POST['submit'])) {
         $remtype = $_REQUEST['remtype'];
         $filedon = $_REQUEST['filedon'];
         $amount = $_REQUEST['amount'];
-        $filepath = "../" . $uploadDirectory .  basename($fileName);
+        $filepath = "reimbursments/" . $fileName;
 
         if ((!empty($remtype)) && (!empty($filedon)) && (!empty($amount))) {
             $queryreminsert = "INSERT INTO `reimbursments` (`id`,`first_name`,`type`,`filed_on`,`amount`,`file`) VALUES('$userid','$firstname','$remtype','$filedon','$amount','$filepath')";
@@ -109,9 +108,6 @@ if (isset($_POST['submit'])) {
 
         header('Location: reimbursment.php');
         exit;
-    }
-    else{
-        echo "<script>alert('File type not supported!')</script>";
     }
 }
 
@@ -375,7 +371,7 @@ if (isset($_POST['submit'])) {
                                                     <td>" . $remrow["type"] . "</td>
                                                     <td>" . $remrow["filed_on"] . "</td>
                                                     <td>" . $remrow["amount"] . "</td>
-                                                    <td> <a href=" . $remrow["file"] . " target='_blank'>
+                                                    <td> <a href=\"../download.php?f=" . urlencode($remrow["file"]) . "\" target='_blank'>
                                                     <button class='btn btn-primary' type='button'>View File</button></a> </td>
                                                     <td>" . $remrow["status"] . "</td>
                                                 </tr>";
