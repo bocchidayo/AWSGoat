@@ -121,8 +121,8 @@ def auth_is_valid(event):
 def lambda_handler(event, context):
     print(event)
     responses = ""
-    userTable = "blog-users"
-    postsTable = "blog-posts"
+    userTable = os.environ.get("USERS_TABLE", "blog-users")
+    postsTable = os.environ.get("POSTS_TABLE", "blog-posts")
 
     dynamodb = boto3.resource("dynamodb")
     dbUserTable = dynamodb.Table(userTable)
@@ -534,19 +534,19 @@ def lambda_handler(event, context):
             try:
                 if authLevel == "200":
                     exec_statement = (
-                        'SELECT * FROM "blog-users" where name = \''
+                        'SELECT * FROM "' + userTable + '" where name = \''
                         + name
                         + "' and authLevel in ('200','100');"
                     )
                 elif authLevel == "100":
                     exec_statement = (
-                        'SELECT * FROM "blog-users" where name = \''
+                        'SELECT * FROM "' + userTable + '" where name = \''
                         + name
                         + "' and authLevel in ('200','100','0');"
                     )
                 else:
                     exec_statement = (
-                        'SELECT * FROM "blog-users" where name = \'' + name + "';"
+                        'SELECT * FROM "' + userTable + '" where name = \'' + name + "';"
                     )
 
                 responses = client.execute_statement(Statement=exec_statement)
@@ -593,11 +593,11 @@ def lambda_handler(event, context):
             print("got auth level")
             try:
                 if authLevel == "200":
-                    exec_statement = """SELECT * FROM "blog-users" where authLevel in ('200','100');"""
+                    exec_statement = 'SELECT * FROM "' + userTable + "\" where authLevel in ('200','100');"
                 elif authLevel == "100":
-                    exec_statement = """SELECT * FROM "blog-users" where authLevel in ('200','100','0');"""
+                    exec_statement = 'SELECT * FROM "' + userTable + "\" where authLevel in ('200','100','0');"
                 else:
-                    exec_statement = 'SELECT * FROM "blog-users";'
+                    exec_statement = 'SELECT * FROM "' + userTable + '";'
 
                 print(exec_statement)
                 responses = client.execute_statement(Statement=exec_statement)

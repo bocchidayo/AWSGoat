@@ -18,6 +18,16 @@ provider "aws" {
 data "aws_caller_identity" "current" {}
 data "aws_region" "current" {}
 
+# Lets the patched ("fix") stack coexist in the same account/region as the
+# original vulnerable deployment, which uses these same base names with no
+# suffix at all - every account/globally-unique resource name below is
+# suffixed with this so the two can be applied side by side for the
+# before/after comparison.
+variable "suffix" {
+  type    = string
+  default = "fix"
+}
+
 # Remediation: RDS master password is generated at apply time instead of being
 # hardcoded in source. It is stored only in Terraform state and in Secrets Manager.
 resource "random_password" "rds_master" {
@@ -100,7 +110,7 @@ resource "aws_security_group" "ecs_sg" {
 # Create Database Subnet Group
 # terraform aws db subnet group
 resource "aws_db_subnet_group" "database-subnet-group" {
-  name        = "database subnets"
+  name        = "database-subnets-${var.suffix}"
   subnet_ids  = [aws_subnet.lab-subnet-public-1.id, aws_subnet.lab-subnet-public-1b.id]
   description = "Subnets for Database Instance"
 
@@ -141,7 +151,7 @@ resource "aws_security_group" "database-security-group" {
 # Create Database Instance Restored from DB Snapshots
 # terraform aws db instance
 resource "aws_db_instance" "database-instance" {
-  identifier             = "aws-goat-db"
+  identifier             = "aws-goat-db-${var.suffix}"
   allocated_storage      = 10
   instance_class         = "db.t3.micro"
   engine                 = "mysql"
@@ -184,7 +194,7 @@ resource "aws_security_group" "load_balancer_security_group" {
 
 
 resource "aws_iam_role" "ecs-instance-role" {
-  name                 = "ecs-instance-role"
+  name                 = "ecs-instance-role-${var.suffix}"
   path                 = "/"
   permissions_boundary = aws_iam_policy.instance_boundary_policy.arn
   assume_role_policy = jsonencode({
@@ -218,7 +228,7 @@ resource "aws_iam_role_policy_attachment" "ecs-instance-role-attachment-3" {
 }
 
 resource "aws_iam_policy" "ecs_instance_policy" {
-  name = "aws-goat-instance-policy"
+  name = "aws-goat-instance-policy-${var.suffix}"
   policy = jsonencode({
     "Statement" : [
       {
@@ -238,7 +248,7 @@ resource "aws_iam_policy" "ecs_instance_policy" {
 }
 
 resource "aws_iam_policy" "instance_boundary_policy" {
-  name = "aws-goat-instance-boundary-policy"
+  name = "aws-goat-instance-boundary-policy-${var.suffix}"
   policy = jsonencode({
     "Statement" : [
       {
@@ -266,12 +276,12 @@ resource "aws_iam_policy" "instance_boundary_policy" {
 }
 
 resource "aws_iam_instance_profile" "ec2-deployer-profile" {
-  name = "ec2Deployer"
+  name = "ec2Deployer-${var.suffix}"
   path = "/"
   role = aws_iam_role.ec2-deployer-role.id
 }
 resource "aws_iam_role" "ec2-deployer-role" {
-  name = "ec2Deployer-role"
+  name = "ec2Deployer-role-${var.suffix}"
   path = "/"
   assume_role_policy = jsonencode({
     "Version" : "2008-10-17",
@@ -289,7 +299,7 @@ resource "aws_iam_role" "ec2-deployer-role" {
 }
 
 resource "aws_iam_policy" "ec2_deployer_admin_policy" {
-  name = "ec2DeployerAdmin-policy"
+  name = "ec2DeployerAdmin-policy-${var.suffix}"
   policy = jsonencode({
     "Statement" : [
       {
@@ -311,12 +321,12 @@ resource "aws_iam_role_policy_attachment" "ec2-deployer-role-attachment" {
 }
 
 resource "aws_iam_instance_profile" "ecs-instance-profile" {
-  name = "ecs-instance-profile"
+  name = "ecs-instance-profile-${var.suffix}"
   path = "/"
   role = aws_iam_role.ecs-instance-role.id
 }
 resource "aws_iam_role" "ecs-task-role" {
-  name = "ecs-task-role"
+  name = "ecs-task-role-${var.suffix}"
   path = "/"
   assume_role_policy = jsonencode({
     "Version" : "2012-10-17",
@@ -387,7 +397,7 @@ resource "aws_launch_template" "ecs_launch_template" {
 }
 
 resource "aws_autoscaling_group" "ecs_asg" {
-  name                = "ECS-lab-asg"
+  name                = "ECS-lab-asg-${var.suffix}"
   vpc_zone_identifier = [aws_subnet.lab-subnet-public-1.id]
   desired_capacity    = 1
   min_size            = 0
@@ -401,7 +411,7 @@ resource "aws_autoscaling_group" "ecs_asg" {
 
 
 resource "aws_ecs_cluster" "cluster" {
-  name = "ecs-lab-cluster"
+  name = "ecs-lab-cluster-${var.suffix}"
 
   tags = {
     name = "ecs-cluster-name"
@@ -455,7 +465,7 @@ resource "aws_ecs_service" "worker" {
 }
 
 resource "aws_alb" "application_load_balancer" {
-  name               = "aws-goat-m2-alb"
+  name               = "aws-goat-m2-alb-${var.suffix}"
   internal           = false
   load_balancer_type = "application"
   subnets            = [aws_subnet.lab-subnet-public-1.id, aws_subnet.lab-subnet-public-1b.id]
@@ -467,7 +477,7 @@ resource "aws_alb" "application_load_balancer" {
 }
 
 resource "aws_lb_target_group" "target_group" {
-  name        = "aws-goat-m2-tg"
+  name        = "aws-goat-m2-tg-${var.suffix}"
   port        = 80
   protocol    = "HTTP"
   target_type = "instance"
@@ -491,7 +501,7 @@ resource "aws_lb_listener" "listener" {
 
 
 resource "aws_secretsmanager_secret" "rds_creds" {
-  name                    = "RDS_CREDS"
+  name                    = "RDS_CREDS_${var.suffix}"
   recovery_window_in_days = 0
 }
 
@@ -504,7 +514,7 @@ resource "aws_secretsmanager_secret_version" "secret_version" {
 }
 
 resource "aws_cloudwatch_log_group" "app" {
-  name              = "/ecs/aws-goat-m2"
+  name              = "/ecs/aws-goat-m2-${var.suffix}"
   retention_in_days = 14
 }
 
@@ -516,7 +526,7 @@ resource "aws_cloudwatch_log_group" "app" {
 # built and pushed from wherever `terraform apply` runs (this matches the
 # existing GitHub Actions workflow, whose ubuntu-latest runner ships Docker).
 resource "aws_ecr_repository" "app" {
-  name                 = "aws-goat-m2"
+  name                 = "aws-goat-m2-${var.suffix}"
   image_tag_mutability = "MUTABLE"
 
   provisioner "local-exec" {
@@ -555,6 +565,7 @@ IMAGE_URI="${data.aws_caller_identity.current.account_id}.dkr.ecr.${data.aws_reg
 sed -i "s,RDS_ENDPOINT_VALUE,$RDS_URL,g" ${path.module}/resources/ecs/task_definition.json
 sed -i "s,ECS_IMAGE_VALUE,$IMAGE_URI,g" ${path.module}/resources/ecs/task_definition.json
 sed -i "s,RDS_SECRET_ARN_VALUE,${aws_secretsmanager_secret.rds_creds.arn},g" ${path.module}/resources/ecs/task_definition.json
+sed -i "s,ECS_LOGGROUP_VALUE,${aws_cloudwatch_log_group.app.name},g" ${path.module}/resources/ecs/task_definition.json
 EOF
     interpreter = ["/bin/bash", "-c"]
   }
@@ -573,6 +584,7 @@ IMAGE_URI="${data.aws_caller_identity.current.account_id}.dkr.ecr.${data.aws_reg
 sed -i "s,$RDS_URL,RDS_ENDPOINT_VALUE,g" ${path.module}/resources/ecs/task_definition.json
 sed -i "s,$IMAGE_URI,ECS_IMAGE_VALUE,g" ${path.module}/resources/ecs/task_definition.json
 sed -i "s,${aws_secretsmanager_secret.rds_creds.arn},RDS_SECRET_ARN_VALUE,g" ${path.module}/resources/ecs/task_definition.json
+sed -i "s,${aws_cloudwatch_log_group.app.name},ECS_LOGGROUP_VALUE,g" ${path.module}/resources/ecs/task_definition.json
 EOF
     interpreter = ["/bin/bash", "-c"]
   }
@@ -585,7 +597,7 @@ EOF
 
 /* Creating a S3 Bucket for Terraform state file upload. */
 resource "aws_s3_bucket" "bucket_tf_files" {
-  bucket        = "do-not-delete-awsgoat-state-files-${data.aws_caller_identity.current.account_id}"
+  bucket        = "do-not-delete-awsgoat-state-files-${data.aws_caller_identity.current.account_id}-${var.suffix}"
   force_destroy = true
   tags = {
     Name        = "Do not delete Bucket"
@@ -616,7 +628,7 @@ variable "monthly_budget_limit_usd" {
 }
 
 resource "aws_budgets_budget" "awsgoat_module_2_monthly_cost" {
-  name         = "awsgoat-module-2-monthly-cost"
+  name         = "awsgoat-module-2-monthly-cost-${var.suffix}"
   budget_type  = "COST"
   limit_amount = var.monthly_budget_limit_usd
   limit_unit   = "USD"

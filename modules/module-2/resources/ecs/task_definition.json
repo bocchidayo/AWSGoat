@@ -29,7 +29,7 @@
         "logConfiguration": {
             "logDriver": "awslogs",
             "options": {
-                "awslogs-group": "/ecs/aws-goat-m2",
+                "awslogs-group": "ECS_LOGGROUP_VALUE",
                 "awslogs-region": "us-east-1",
                 "awslogs-stream-prefix": "ecs",
                 "awslogs-create-group": "true"

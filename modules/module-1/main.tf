@@ -16,6 +16,16 @@ provider "aws" {
 
 data "aws_caller_identity" "current" {}
 
+# Lets the patched ("fix") stack coexist in the same account/region as the
+# original vulnerable deployment, which uses these same base names with no
+# suffix at all - every account/globally-unique resource name below is
+# suffixed with this so the two can be applied side by side for the
+# before/after comparison.
+variable "suffix" {
+  type    = string
+  default = "fix"
+}
+
 # Remediation (RT-hardcoded-secret): the JWT signing secret used to be a
 # literal string committed to this file, readable by anyone with repo access
 # and baked in plaintext into the Lambda's environment. It is now generated
@@ -35,7 +45,7 @@ data "archive_file" "lambda_zip" {
 
 resource "aws_lambda_function" "react_lambda_app" {
   filename      = "resources/lambda/out/reactapp.zip"
-  function_name = "blog-application"
+  function_name = "blog-application-${var.suffix}"
   handler       = "index.handler"
   runtime       = "nodejs18.x"
   role          = aws_iam_role.blog_app_lambda.arn
@@ -46,7 +56,7 @@ resource "aws_lambda_function" "react_lambda_app" {
 /* Lambda iam Role */
 
 resource "aws_iam_role" "blog_app_lambda" {
-  name = "blog_app_lambda"
+  name = "blog_app_lambda_${var.suffix}"
 
   assume_role_policy = <<EOF
 {
@@ -77,7 +87,7 @@ resource "aws_iam_role_policy_attachment" "ba_lambda_attach_3" {
 
 
 resource "aws_api_gateway_rest_api" "api" {
-  name = "blog-application"
+  name = "blog-application-${var.suffix}"
   endpoint_configuration {
     types = [
       "REGIONAL"
@@ -217,7 +227,7 @@ resource "aws_api_gateway_rest_api_policy" "api_policy" {
 
 
 resource "aws_api_gateway_rest_api" "apiLambda_ba" {
-  name           = "blog-application-api"
+  name           = "blog-application-api-${var.suffix}"
   api_key_source = "HEADER"
   endpoint_configuration {
     types = [
@@ -3165,7 +3175,7 @@ resource "aws_lambda_layer_version" "lambda_layer" {
 
 resource "aws_lambda_function" "lambda_ba_data" {
   filename      = "resources/lambda/out/data_app.zip"
-  function_name = "blog-application-data"
+  function_name = "blog-application-data-${var.suffix}"
   handler       = "lambda_function.lambda_handler"
   runtime       = "python3.9"
   role          = aws_iam_role.blog_app_lambda_python.arn
@@ -3174,7 +3184,9 @@ resource "aws_lambda_function" "lambda_ba_data" {
   memory_size   = "256"
   environment {
     variables = {
-      JWT_SECRET = random_password.jwt_secret.result
+      JWT_SECRET  = random_password.jwt_secret.result
+      USERS_TABLE = aws_dynamodb_table.users_table.name
+      POSTS_TABLE = aws_dynamodb_table.posts_table.name
     }
   }
 }
@@ -3183,7 +3195,7 @@ resource "aws_lambda_function" "lambda_ba_data" {
 /* Lambda iam Role */
 
 resource "aws_iam_role" "blog_app_lambda_python" {
-  name = "blog_app_lambda_data"
+  name = "blog_app_lambda_data_${var.suffix}"
 
   assume_role_policy = <<EOF
 {
@@ -3209,7 +3221,7 @@ resource "aws_iam_role_policy_attachment" "blog_app_policy" {
 }
 
 resource "aws_iam_policy" "lambda_data_policies" {
-  name = "lambda-data-policies"
+  name = "lambda-data-policies-${var.suffix}"
   policy = jsonencode({
     "Statement" : [
       {
@@ -3275,7 +3287,7 @@ locals {
 
 /* Creating a S3 Bucket for webfiles files upload. */
 resource "aws_s3_bucket" "bucket_upload" {
-  bucket        = "production-blog-awsgoat-bucket-${data.aws_caller_identity.current.account_id}"
+  bucket        = "production-blog-awsgoat-bucket-${data.aws_caller_identity.current.account_id}-${var.suffix}"
   force_destroy = true
   tags = {
     Name        = "Production bucket"
@@ -3361,7 +3373,7 @@ resource "aws_s3_object" "upload_folder_prod" {
 
 #Development bucket
 resource "aws_s3_bucket" "dev" {
-  bucket = "dev-blog-awsgoat-bucket-${data.aws_caller_identity.current.account_id}"
+  bucket = "dev-blog-awsgoat-bucket-${data.aws_caller_identity.current.account_id}-${var.suffix}"
 
   tags = {
     Name        = "Development bucket"
@@ -3442,7 +3454,7 @@ resource "aws_s3_object" "upload_folder_dev" {
 
 /* Creating a S3 Bucket for ec2-files upload. */
 resource "aws_s3_bucket" "bucket_temp" {
-  bucket        = "ec2-temp-bucket-${data.aws_caller_identity.current.account_id}"
+  bucket        = "ec2-temp-bucket-${data.aws_caller_identity.current.account_id}-${var.suffix}"
   force_destroy = true
 
   tags = {
@@ -3501,7 +3513,7 @@ resource "aws_s3_object" "upload_temp_object_2" {
 }
 /* Creating a S3 Bucket for Terraform state file upload. */
 resource "aws_s3_bucket" "bucket_tf_files" {
-  bucket        = "do-not-delete-awsgoat-state-files-${data.aws_caller_identity.current.account_id}"
+  bucket        = "do-not-delete-awsgoat-state-files-${data.aws_caller_identity.current.account_id}-${var.suffix}"
   force_destroy = true
   tags = {
     Name        = "Do not delete Bucket"
@@ -3574,11 +3586,11 @@ resource "aws_security_group" "goat_sg" {
 
 # Instance Requirements
 resource "aws_iam_instance_profile" "goat_iam_profile" {
-  name = "AWS_GOAT_ec2_profile"
+  name = "AWS_GOAT_ec2_profile_${var.suffix}"
   role = aws_iam_role.goat_role.name
 }
 resource "aws_iam_role" "goat_role" {
-  name               = "AWS_GOAT_ROLE"
+  name               = "AWS_GOAT_ROLE_${var.suffix}"
   path               = "/"
   assume_role_policy = <<EOF
 {
@@ -3608,7 +3620,7 @@ resource "aws_iam_role_policy_attachment" "goat_policy" {
 }
 
 resource "aws_iam_policy" "goat_inline_policy_2" {
-  name = "dev-ec2-lambda-policies"
+  name = "dev-ec2-lambda-policies-${var.suffix}"
   policy = jsonencode({
     "Statement" : [
       {
@@ -3698,7 +3710,7 @@ resource "aws_instance" "goat_instance" {
 
 
 resource "aws_dynamodb_table" "users_table" {
-  name           = "blog-users"
+  name           = "blog-users-${var.suffix}"
   billing_mode   = "PROVISIONED"
   read_capacity  = 2
   write_capacity = 2
@@ -3710,7 +3722,7 @@ resource "aws_dynamodb_table" "users_table" {
   }
 }
 resource "aws_dynamodb_table" "posts_table" {
-  name           = "blog-posts"
+  name           = "blog-posts-${var.suffix}"
   billing_mode   = "PROVISIONED"
   read_capacity  = 2
   write_capacity = 2
@@ -3727,7 +3739,7 @@ resource "null_resource" "populate_table" {
   provisioner "local-exec" {
     command     = <<EOF
 sed -i 's/replace-bucket-name/${aws_s3_bucket.bucket_upload.bucket}/g' resources/dynamodb/blog-posts.json
-python3 resources/dynamodb/populate-table.py
+USERS_TABLE="${aws_dynamodb_table.users_table.name}" POSTS_TABLE="${aws_dynamodb_table.posts_table.name}" python3 resources/dynamodb/populate-table.py
 EOF
     interpreter = ["/bin/bash", "-c"]
   }
@@ -3820,7 +3832,7 @@ variable "monthly_budget_limit_usd" {
 }
 
 resource "aws_budgets_budget" "awsgoat_module_1_monthly_cost" {
-  name         = "awsgoat-module-1-monthly-cost"
+  name         = "awsgoat-module-1-monthly-cost-${var.suffix}"
   budget_type  = "COST"
   limit_amount = var.monthly_budget_limit_usd
   limit_unit   = "USD"
