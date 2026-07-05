@@ -3472,7 +3472,8 @@ resource "aws_security_group" "goat_sg" {
     from_port   = 22
     to_port     = 22
     protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+    # Restricted to the sandbox pentest machine only; do not open to 0.0.0.0/0
+    cidr_blocks = ["191.96.216.174/32"]
   }
   egress {
     from_port   = 0
