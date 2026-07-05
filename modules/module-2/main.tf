@@ -526,3 +526,45 @@ resource "aws_s3_bucket" "bucket_tf_files" {
 output "ad_Target_URL" {
   value = "${aws_alb.application_load_balancer.dns_name}:80/login.php"
 }
+
+
+# ---------------------------------------------------------------------------
+# Cost guardrail: alert if the lab is left running / abused.
+# A monthly account COST budget that emails when spend crosses the thresholds.
+# Override the email/limit with -var or a tfvars file.
+# ---------------------------------------------------------------------------
+variable "budget_alert_email" {
+  description = "Email address that receives AWSGoat budget alerts."
+  type        = string
+  default     = "hikari@toadsec.io"
+}
+
+variable "monthly_budget_limit_usd" {
+  description = "Monthly cost budget for the AWSGoat lab, in USD."
+  type        = string
+  default     = "20"
+}
+
+resource "aws_budgets_budget" "awsgoat_module_2_monthly_cost" {
+  name         = "awsgoat-module-2-monthly-cost"
+  budget_type  = "COST"
+  limit_amount = var.monthly_budget_limit_usd
+  limit_unit   = "USD"
+  time_unit    = "MONTHLY"
+
+  notification {
+    comparison_operator        = "GREATER_THAN"
+    threshold                  = 80
+    threshold_type             = "PERCENTAGE"
+    notification_type          = "ACTUAL"
+    subscriber_email_addresses = [var.budget_alert_email]
+  }
+
+  notification {
+    comparison_operator        = "GREATER_THAN"
+    threshold                  = 100
+    threshold_type             = "PERCENTAGE"
+    notification_type          = "FORECASTED"
+    subscriber_email_addresses = [var.budget_alert_email]
+  }
+}
