@@ -154,13 +154,47 @@ resource "aws_lambda_permission" "apigw_ba" {
 resource "aws_api_gateway_deployment" "api" {
   rest_api_id = aws_api_gateway_rest_api.api.id
   description = "Deployed endpoint at ${timestamp()}"
-  depends_on  = [aws_api_gateway_integration_response.endpoint]
+  triggers = {
+    # Force a redeploy when the IP-restriction resource policy changes so it takes effect
+    resource_policy = sha1(aws_api_gateway_rest_api_policy.api_policy.policy)
+  }
+  depends_on = [aws_api_gateway_integration_response.endpoint, aws_api_gateway_rest_api_policy.api_policy]
 }
 
 resource "aws_api_gateway_stage" "api" {
   stage_name    = "prod"
   rest_api_id   = aws_api_gateway_rest_api.api.id
   deployment_id = aws_api_gateway_deployment.api.id
+}
+
+# Restrict the React frontend REST API to the sandbox pentest machine only.
+# API Gateway is not covered by security groups; access is limited via a
+# resource policy that denies any source IP other than the pentest machine.
+resource "aws_api_gateway_rest_api_policy" "api_policy" {
+  rest_api_id = aws_api_gateway_rest_api.api.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect    = "Allow"
+        Principal = "*"
+        Action    = "execute-api:Invoke"
+        Resource  = "${aws_api_gateway_rest_api.api.execution_arn}/*"
+      },
+      {
+        Effect    = "Deny"
+        Principal = "*"
+        Action    = "execute-api:Invoke"
+        Resource  = "${aws_api_gateway_rest_api.api.execution_arn}/*"
+        Condition = {
+          NotIpAddress = {
+            "aws:SourceIp" = ["191.96.216.174/32"]
+          }
+        }
+      }
+    ]
+  })
 }
 
 
@@ -3054,6 +3088,8 @@ resource "aws_api_gateway_deployment" "apideploy_ba" {
     aws_api_gateway_integration_response.lambda_change_profile_root_post_integration_response,
     aws_api_gateway_method_response.proxy_change_profile_root_post_response_200,
     aws_api_gateway_integration.lambda_change_profile_root_post,
+
+    aws_api_gateway_rest_api_policy.apiLambda_ba_policy,
   ]
 
   rest_api_id = aws_api_gateway_rest_api.apiLambda_ba.id
@@ -3061,6 +3097,40 @@ resource "aws_api_gateway_deployment" "apideploy_ba" {
   variables = {
     "BLOG_KEY" = "655877f0f8ade541e1d21a48fe396ddb"
   }
+  triggers = {
+    # Force a redeploy when the IP-restriction resource policy changes so it takes effect
+    resource_policy = sha1(aws_api_gateway_rest_api_policy.apiLambda_ba_policy.policy)
+  }
+}
+
+# Restrict the backend blog API to the sandbox pentest machine only.
+# API Gateway is not covered by security groups; access is limited via a
+# resource policy that denies any source IP other than the pentest machine.
+resource "aws_api_gateway_rest_api_policy" "apiLambda_ba_policy" {
+  rest_api_id = aws_api_gateway_rest_api.apiLambda_ba.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect    = "Allow"
+        Principal = "*"
+        Action    = "execute-api:Invoke"
+        Resource  = "${aws_api_gateway_rest_api.apiLambda_ba.execution_arn}/*"
+      },
+      {
+        Effect    = "Deny"
+        Principal = "*"
+        Action    = "execute-api:Invoke"
+        Resource  = "${aws_api_gateway_rest_api.apiLambda_ba.execution_arn}/*"
+        Condition = {
+          NotIpAddress = {
+            "aws:SourceIp" = ["191.96.216.174/32"]
+          }
+        }
+      }
+    ]
+  })
 }
 
 /* Lambda Setup - blog-application-data*/
