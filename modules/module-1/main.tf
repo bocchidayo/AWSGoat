@@ -154,13 +154,47 @@ resource "aws_lambda_permission" "apigw_ba" {
 resource "aws_api_gateway_deployment" "api" {
   rest_api_id = aws_api_gateway_rest_api.api.id
   description = "Deployed endpoint at ${timestamp()}"
-  depends_on  = [aws_api_gateway_integration_response.endpoint]
+  triggers = {
+    # Force a redeploy when the IP-restriction resource policy changes so it takes effect
+    resource_policy = sha1(aws_api_gateway_rest_api_policy.api_policy.policy)
+  }
+  depends_on = [aws_api_gateway_integration_response.endpoint, aws_api_gateway_rest_api_policy.api_policy]
 }
 
 resource "aws_api_gateway_stage" "api" {
   stage_name    = "prod"
   rest_api_id   = aws_api_gateway_rest_api.api.id
   deployment_id = aws_api_gateway_deployment.api.id
+}
+
+# Restrict the React frontend REST API to the sandbox pentest machine only.
+# API Gateway is not covered by security groups; access is limited via a
+# resource policy that denies any source IP other than the pentest machine.
+resource "aws_api_gateway_rest_api_policy" "api_policy" {
+  rest_api_id = aws_api_gateway_rest_api.api.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect    = "Allow"
+        Principal = "*"
+        Action    = "execute-api:Invoke"
+        Resource  = "${aws_api_gateway_rest_api.api.execution_arn}/*"
+      },
+      {
+        Effect    = "Deny"
+        Principal = "*"
+        Action    = "execute-api:Invoke"
+        Resource  = "${aws_api_gateway_rest_api.api.execution_arn}/*"
+        Condition = {
+          NotIpAddress = {
+            "aws:SourceIp" = ["191.96.216.174/32"]
+          }
+        }
+      }
+    ]
+  })
 }
 
 
@@ -3054,6 +3088,8 @@ resource "aws_api_gateway_deployment" "apideploy_ba" {
     aws_api_gateway_integration_response.lambda_change_profile_root_post_integration_response,
     aws_api_gateway_method_response.proxy_change_profile_root_post_response_200,
     aws_api_gateway_integration.lambda_change_profile_root_post,
+
+    aws_api_gateway_rest_api_policy.apiLambda_ba_policy,
   ]
 
   rest_api_id = aws_api_gateway_rest_api.apiLambda_ba.id
@@ -3061,6 +3097,40 @@ resource "aws_api_gateway_deployment" "apideploy_ba" {
   variables = {
     "BLOG_KEY" = "655877f0f8ade541e1d21a48fe396ddb"
   }
+  triggers = {
+    # Force a redeploy when the IP-restriction resource policy changes so it takes effect
+    resource_policy = sha1(aws_api_gateway_rest_api_policy.apiLambda_ba_policy.policy)
+  }
+}
+
+# Restrict the backend blog API to the sandbox pentest machine only.
+# API Gateway is not covered by security groups; access is limited via a
+# resource policy that denies any source IP other than the pentest machine.
+resource "aws_api_gateway_rest_api_policy" "apiLambda_ba_policy" {
+  rest_api_id = aws_api_gateway_rest_api.apiLambda_ba.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect    = "Allow"
+        Principal = "*"
+        Action    = "execute-api:Invoke"
+        Resource  = "${aws_api_gateway_rest_api.apiLambda_ba.execution_arn}/*"
+      },
+      {
+        Effect    = "Deny"
+        Principal = "*"
+        Action    = "execute-api:Invoke"
+        Resource  = "${aws_api_gateway_rest_api.apiLambda_ba.execution_arn}/*"
+        Condition = {
+          NotIpAddress = {
+            "aws:SourceIp" = ["191.96.216.174/32"]
+          }
+        }
+      }
+    ]
+  })
 }
 
 /* Lambda Setup - blog-application-data*/
@@ -3472,7 +3542,8 @@ resource "aws_security_group" "goat_sg" {
     from_port   = 22
     to_port     = 22
     protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+    # Restricted to the sandbox pentest machine only; do not open to 0.0.0.0/0
+    cidr_blocks = ["191.96.216.174/32"]
   }
   egress {
     from_port   = 0
@@ -3714,5 +3785,47 @@ EOF
 
 output "app_url" {
   value = "${aws_api_gateway_stage.api.invoke_url}/react"
+}
+
+
+# ---------------------------------------------------------------------------
+# Cost guardrail: alert if the lab is left running / abused.
+# A monthly account COST budget that emails when spend crosses the thresholds.
+# Override the email/limit with -var or a tfvars file.
+# ---------------------------------------------------------------------------
+variable "budget_alert_email" {
+  description = "Email address that receives AWSGoat budget alerts."
+  type        = string
+  default     = "hikari@toadsec.io"
+}
+
+variable "monthly_budget_limit_usd" {
+  description = "Monthly cost budget for the AWSGoat lab, in USD."
+  type        = string
+  default     = "20"
+}
+
+resource "aws_budgets_budget" "awsgoat_module_1_monthly_cost" {
+  name         = "awsgoat-module-1-monthly-cost"
+  budget_type  = "COST"
+  limit_amount = var.monthly_budget_limit_usd
+  limit_unit   = "USD"
+  time_unit    = "MONTHLY"
+
+  notification {
+    comparison_operator        = "GREATER_THAN"
+    threshold                  = 80
+    threshold_type             = "PERCENTAGE"
+    notification_type          = "ACTUAL"
+    subscriber_email_addresses = [var.budget_alert_email]
+  }
+
+  notification {
+    comparison_operator        = "GREATER_THAN"
+    threshold                  = 100
+    threshold_type             = "PERCENTAGE"
+    notification_type          = "FORECASTED"
+    subscriber_email_addresses = [var.budget_alert_email]
+  }
 }
 
