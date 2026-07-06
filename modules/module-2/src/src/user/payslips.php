@@ -357,7 +357,7 @@ if (isset($_POST['submit'])) {
                                 <dl class='row'>
                                     <dt class='col-2'>" . date_format($date1,"Y F") . "</dt>
                                     <dd class='col-4'>" . $remrow['payslip_id'] . "</dd>
-                                    <dd class='col-6'><a href=" . $remrow["file"] . " target='_blank'>
+                                    <dd class='col-6'><a href=\"../download.php?f=" . urlencode($remrow["file"]) . "\" target='_blank'>
                                     <button class='btn btn-primary' type='button'>View File</button></a></dd>
                                 </dl>
                             </div> 

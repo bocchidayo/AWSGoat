@@ -4,6 +4,10 @@ terraform {
       source  = "hashicorp/aws"
       version = "~> 3.27"
     }
+    random = {
+      source  = "hashicorp/random"
+      version = "~> 3.5"
+    }
   }
 }
 
@@ -12,6 +16,24 @@ provider "aws" {
 }
 
 data "aws_caller_identity" "current" {}
+data "aws_region" "current" {}
+
+# Lets the patched ("fix") stack coexist in the same account/region as the
+# original vulnerable deployment, which uses these same base names with no
+# suffix at all - every account/globally-unique resource name below is
+# suffixed with this so the two can be applied side by side for the
+# before/after comparison.
+variable "suffix" {
+  type    = string
+  default = "fix"
+}
+
+# Remediation: RDS master password is generated at apply time instead of being
+# hardcoded in source. It is stored only in Terraform state and in Secrets Manager.
+resource "random_password" "rds_master" {
+  length  = 24
+  special = false
+}
 
 data "aws_availability_zones" "available" {
   state = "available"
@@ -88,7 +110,7 @@ resource "aws_security_group" "ecs_sg" {
 # Create Database Subnet Group
 # terraform aws db subnet group
 resource "aws_db_subnet_group" "database-subnet-group" {
-  name        = "database subnets"
+  name        = "database-subnets-${var.suffix}"
   subnet_ids  = [aws_subnet.lab-subnet-public-1.id, aws_subnet.lab-subnet-public-1b.id]
   description = "Subnets for Database Instance"
 
@@ -129,13 +151,13 @@ resource "aws_security_group" "database-security-group" {
 # Create Database Instance Restored from DB Snapshots
 # terraform aws db instance
 resource "aws_db_instance" "database-instance" {
-  identifier             = "aws-goat-db"
+  identifier             = "aws-goat-db-${var.suffix}"
   allocated_storage      = 10
   instance_class         = "db.t3.micro"
   engine                 = "mysql"
   engine_version         = "8.0"
   username               = "root"
-  password               = "T2kVB3zgeN3YbrKS"
+  password               = random_password.rds_master.result
   parameter_group_name   = "default.mysql8.0"
   skip_final_snapshot    = true
   availability_zone      = "us-east-1a"
@@ -172,7 +194,7 @@ resource "aws_security_group" "load_balancer_security_group" {
 
 
 resource "aws_iam_role" "ecs-instance-role" {
-  name                 = "ecs-instance-role"
+  name                 = "ecs-instance-role-${var.suffix}"
   path                 = "/"
   permissions_boundary = aws_iam_policy.instance_boundary_policy.arn
   assume_role_policy = jsonencode({
@@ -195,10 +217,18 @@ resource "aws_iam_role_policy_attachment" "ecs-instance-role-attachment-1" {
   role       = aws_iam_role.ecs-instance-role.name
   policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role"
 }
-resource "aws_iam_role_policy_attachment" "ecs-instance-role-attachment-2" {
-  role       = aws_iam_role.ecs-instance-role.name
-  policy_arn = "arn:aws:iam::aws:policy/IAMFullAccess"
-}
+# Remediation (IAM Privilege Escalation, attack-manuals/module-2/04-IAM
+# Privilege Escalation.md): this role previously had the AWS-managed
+# IAMFullAccess policy plus a boundary that allowed ec2:RunInstances +
+# iam:PassRole - which let anyone with this instance's credentials launch a
+# new EC2 instance, pass it the unrelated "ec2Deployer-role" (which had
+# "Action:*, Resource:*"), and use that instance's credentials to create an
+# IAM admin user. An ECS container-instance host has no legitimate need for
+# IAM write access, to launch other instances, or to pass any role, so
+# IAMFullAccess is removed and the custom policy/boundary below no longer
+# grant either. The escalation-target role/policy (ec2Deployer-role /
+# ec2DeployerAdmin-policy), which nothing else in this stack ever references,
+# is removed outright rather than "scoped down" since it serves no purpose.
 
 resource "aws_iam_role_policy_attachment" "ecs-instance-role-attachment-3" {
   role       = aws_iam_role.ecs-instance-role.name
@@ -206,14 +236,11 @@ resource "aws_iam_role_policy_attachment" "ecs-instance-role-attachment-3" {
 }
 
 resource "aws_iam_policy" "ecs_instance_policy" {
-  name = "aws-goat-instance-policy"
+  name = "aws-goat-instance-policy-${var.suffix}"
   policy = jsonencode({
     "Statement" : [
       {
         "Action" : [
-          "ssm:*",
-          "ssmmessages:*",
-          "ec2:RunInstances",
           "ec2:Describe*"
         ],
         "Effect" : "Allow",
@@ -226,18 +253,15 @@ resource "aws_iam_policy" "ecs_instance_policy" {
 }
 
 resource "aws_iam_policy" "instance_boundary_policy" {
-  name = "aws-goat-instance-boundary-policy"
+  name = "aws-goat-instance-boundary-policy-${var.suffix}"
   policy = jsonencode({
     "Statement" : [
       {
         "Action" : [
           "iam:List*",
           "iam:Get*",
-          "iam:PassRole",
-          "iam:PutRole*",
           "ssm:*",
           "ssmmessages:*",
-          "ec2:RunInstances",
           "ec2:Describe*",
           "ecs:*",
           "ecr:*",
@@ -253,58 +277,13 @@ resource "aws_iam_policy" "instance_boundary_policy" {
   })
 }
 
-resource "aws_iam_instance_profile" "ec2-deployer-profile" {
-  name = "ec2Deployer"
-  path = "/"
-  role = aws_iam_role.ec2-deployer-role.id
-}
-resource "aws_iam_role" "ec2-deployer-role" {
-  name = "ec2Deployer-role"
-  path = "/"
-  assume_role_policy = jsonencode({
-    "Version" : "2008-10-17",
-    "Statement" : [
-      {
-        "Sid" : "",
-        "Effect" : "Allow",
-        "Principal" : {
-          "Service" : "ec2.amazonaws.com"
-        },
-        "Action" : "sts:AssumeRole"
-      }
-    ]
-  })
-}
-
-resource "aws_iam_policy" "ec2_deployer_admin_policy" {
-  name = "ec2DeployerAdmin-policy"
-  policy = jsonencode({
-    "Statement" : [
-      {
-        "Action" : [
-          "*"
-        ],
-        "Effect" : "Allow",
-        "Resource" : "*",
-        "Sid" : "Policy1"
-      }
-    ],
-    "Version" : "2012-10-17"
-  })
-}
-
-resource "aws_iam_role_policy_attachment" "ec2-deployer-role-attachment" {
-  role       = aws_iam_role.ec2-deployer-role.name
-  policy_arn = aws_iam_policy.ec2_deployer_admin_policy.arn
-}
-
 resource "aws_iam_instance_profile" "ecs-instance-profile" {
-  name = "ecs-instance-profile"
+  name = "ecs-instance-profile-${var.suffix}"
   path = "/"
   role = aws_iam_role.ecs-instance-role.id
 }
 resource "aws_iam_role" "ecs-task-role" {
-  name = "ecs-task-role"
+  name = "ecs-task-role-${var.suffix}"
   path = "/"
   assume_role_policy = jsonencode({
     "Version" : "2012-10-17",
@@ -326,9 +305,22 @@ resource "aws_iam_role_policy_attachment" "ecs-task-role-attachment" {
   role       = aws_iam_role.ecs-task-role.name
   policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
 }
-resource "aws_iam_role_policy_attachment" "ecs-task-role-attachment-2" {
-  role       = aws_iam_role.ecs-task-role.name
-  policy_arn = "arn:aws:iam::aws:policy/SecretsManagerReadWrite"
+# Remediation (RT-01): the task role previously had the AWS-managed
+# `SecretsManagerReadWrite` policy attached, which grants read/write on every
+# secret in the account. The application only ever needs to read its own DB
+# credential secret at container startup, so this is replaced with an inline
+# policy scoped to that single resource and to the read-only action.
+resource "aws_iam_role_policy" "ecs-task-role-secrets-scoped" {
+  name = "rds-creds-read-only"
+  role = aws_iam_role.ecs-task-role.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect   = "Allow"
+      Action   = ["secretsmanager:GetSecretValue"]
+      Resource = [aws_secretsmanager_secret.rds_creds.arn]
+    }]
+  })
 }
 
 resource "aws_iam_role_policy_attachment" "ecs-instance-role-attachment-ssm" {
@@ -362,7 +354,7 @@ resource "aws_launch_template" "ecs_launch_template" {
 }
 
 resource "aws_autoscaling_group" "ecs_asg" {
-  name                = "ECS-lab-asg"
+  name                = "ECS-lab-asg-${var.suffix}"
   vpc_zone_identifier = [aws_subnet.lab-subnet-public-1.id]
   desired_capacity    = 1
   min_size            = 0
@@ -376,15 +368,22 @@ resource "aws_autoscaling_group" "ecs_asg" {
 
 
 resource "aws_ecs_cluster" "cluster" {
-  name = "ecs-lab-cluster"
+  name = "ecs-lab-cluster-${var.suffix}"
 
   tags = {
     name = "ecs-cluster-name"
   }
 }
 
+# Bugfix: this previously hardcoded ECS_CLUSTER=ecs-lab-cluster (no suffix),
+# so any EC2 launched by the "fix" stack's ASG joined the *original*
+# unsuffixed cluster instead of its own - discovered when the patched stack's
+# task failed to place ("No Container Instances were found").
 data "template_file" "user_data" {
   template = file("${path.module}/resources/ecs/user_data.tpl")
+  vars = {
+    ecs_cluster_name = aws_ecs_cluster.cluster.name
+  }
 }
 
 resource "aws_ecs_task_definition" "task_definition" {
@@ -395,22 +394,20 @@ resource "aws_ecs_task_definition" "task_definition" {
   cpu                      = "512"
   requires_compatibilities = ["EC2"]
   task_role_arn            = aws_iam_role.ecs-task-role.arn
+  execution_role_arn       = aws_iam_role.ecs-task-role.arn
 
-  pid_mode = "host"
-  volume {
-    name      = "modules"
-    host_path = "/lib/modules"
-  }
-  volume {
-    name      = "kernels"
-    host_path = "/usr/src/kernels"
-  }
+  # Remediation (RT-04 hardening): the previous definition set pid_mode="host"
+  # and mounted host kernel module directories into the container, with the
+  # SYS_PTRACE capability added in the container definition. None of this is
+  # needed by a PHP/Apache app and it is a well-known container-escape vector
+  # (ptrace against host processes visible via a shared PID namespace). Removed.
 }
 
 data "template_file" "task_definition_json" {
   template = file("${path.module}/resources/ecs/task_definition.json")
   depends_on = [
-    null_resource.rds_endpoint
+    null_resource.rds_endpoint,
+    null_resource.build_and_push_image
   ]
 }
 
@@ -432,7 +429,7 @@ resource "aws_ecs_service" "worker" {
 }
 
 resource "aws_alb" "application_load_balancer" {
-  name               = "aws-goat-m2-alb"
+  name               = "aws-goat-m2-alb-${var.suffix}"
   internal           = false
   load_balancer_type = "application"
   subnets            = [aws_subnet.lab-subnet-public-1.id, aws_subnet.lab-subnet-public-1b.id]
@@ -444,7 +441,7 @@ resource "aws_alb" "application_load_balancer" {
 }
 
 resource "aws_lb_target_group" "target_group" {
-  name        = "aws-goat-m2-tg"
+  name        = "aws-goat-m2-tg-${var.suffix}"
   port        = 80
   protocol    = "HTTP"
   target_type = "instance"
@@ -468,18 +465,59 @@ resource "aws_lb_listener" "listener" {
 
 
 resource "aws_secretsmanager_secret" "rds_creds" {
-  name                    = "RDS_CREDS"
+  name                    = "RDS_CREDS_${var.suffix}"
   recovery_window_in_days = 0
 }
 
 resource "aws_secretsmanager_secret_version" "secret_version" {
-  secret_id     = aws_secretsmanager_secret.rds_creds.id
-  secret_string = <<EOF
-   {
-    "username": "root",
-    "password": "T2kVB3zgeN3YbrKS"
-   }
+  secret_id = aws_secretsmanager_secret.rds_creds.id
+  secret_string = jsonencode({
+    username = "root"
+    password = random_password.rds_master.result
+  })
+}
+
+resource "aws_cloudwatch_log_group" "app" {
+  name              = "/ecs/aws-goat-m2-${var.suffix}"
+  retention_in_days = 14
+}
+
+# Remediation (RT-04): the running task previously pulled a public, unpatched
+# image (public.ecr.aws/p3q0v3y2/aws-goat-m2). Editing the Dockerfile/PHP
+# source alone would have no effect on what is actually deployed, so a
+# private ECR repo is created and the patched image (SQLi fix, upload
+# validation, authenticated document downloads, sudoers rule removed) is
+# built and pushed from wherever `terraform apply` runs (this matches the
+# existing GitHub Actions workflow, whose ubuntu-latest runner ships Docker).
+resource "aws_ecr_repository" "app" {
+  name                 = "aws-goat-m2-${var.suffix}"
+  image_tag_mutability = "MUTABLE"
+
+  provisioner "local-exec" {
+    when        = destroy
+    command     = "aws ecr batch-delete-image --repository-name ${self.name} --region us-east-1 --image-ids imageTag=latest || true"
+    interpreter = ["/bin/bash", "-c"]
+  }
+}
+
+resource "null_resource" "build_and_push_image" {
+  triggers = {
+    src_hash = sha1(join("", [for f in fileset("${path.module}/src/src", "**") : filesha1("${path.module}/src/src/${f}")]))
+    dockerfile_hash = filesha1("${path.module}/src/Dockerfile")
+  }
+
+  provisioner "local-exec" {
+    command     = <<EOF
+set -euo pipefail
+REGISTRY="${data.aws_caller_identity.current.account_id}.dkr.ecr.${data.aws_region.current.name}.amazonaws.com"
+aws ecr get-login-password --region ${data.aws_region.current.name} | docker login --username AWS --password-stdin "$REGISTRY"
+docker build -t "$REGISTRY/${aws_ecr_repository.app.name}:latest" ${path.module}/src
+docker push "$REGISTRY/${aws_ecr_repository.app.name}:latest"
 EOF
+    interpreter = ["/bin/bash", "-c"]
+  }
+
+  depends_on = [aws_ecr_repository.app]
 }
 
 resource "null_resource" "rds_endpoint" {
@@ -487,13 +525,17 @@ resource "null_resource" "rds_endpoint" {
     command     = <<EOF
 RDS_URL="${aws_db_instance.database-instance.endpoint}"
 RDS_URL=$${RDS_URL::-5}
+IMAGE_URI="${data.aws_caller_identity.current.account_id}.dkr.ecr.${data.aws_region.current.name}.amazonaws.com/${aws_ecr_repository.app.name}:latest"
 sed -i "s,RDS_ENDPOINT_VALUE,$RDS_URL,g" ${path.module}/resources/ecs/task_definition.json
+sed -i "s,ECS_IMAGE_VALUE,$IMAGE_URI,g" ${path.module}/resources/ecs/task_definition.json
+sed -i "s,RDS_SECRET_ARN_VALUE,${aws_secretsmanager_secret.rds_creds.arn},g" ${path.module}/resources/ecs/task_definition.json
+sed -i "s,ECS_LOGGROUP_VALUE,${aws_cloudwatch_log_group.app.name},g" ${path.module}/resources/ecs/task_definition.json
 EOF
     interpreter = ["/bin/bash", "-c"]
   }
 
   depends_on = [
-    aws_db_instance.database-instance
+    aws_db_instance.database-instance, null_resource.build_and_push_image, aws_secretsmanager_secret_version.secret_version
   ]
 }
 
@@ -502,7 +544,11 @@ resource "null_resource" "cleanup" {
     command     = <<EOF
 RDS_URL="${aws_db_instance.database-instance.endpoint}"
 RDS_URL=$${RDS_URL::-5}
+IMAGE_URI="${data.aws_caller_identity.current.account_id}.dkr.ecr.${data.aws_region.current.name}.amazonaws.com/${aws_ecr_repository.app.name}:latest"
 sed -i "s,$RDS_URL,RDS_ENDPOINT_VALUE,g" ${path.module}/resources/ecs/task_definition.json
+sed -i "s,$IMAGE_URI,ECS_IMAGE_VALUE,g" ${path.module}/resources/ecs/task_definition.json
+sed -i "s,${aws_secretsmanager_secret.rds_creds.arn},RDS_SECRET_ARN_VALUE,g" ${path.module}/resources/ecs/task_definition.json
+sed -i "s,${aws_cloudwatch_log_group.app.name},ECS_LOGGROUP_VALUE,g" ${path.module}/resources/ecs/task_definition.json
 EOF
     interpreter = ["/bin/bash", "-c"]
   }
@@ -515,7 +561,7 @@ EOF
 
 /* Creating a S3 Bucket for Terraform state file upload. */
 resource "aws_s3_bucket" "bucket_tf_files" {
-  bucket        = "do-not-delete-awsgoat-state-files-${data.aws_caller_identity.current.account_id}"
+  bucket        = "do-not-delete-awsgoat-state-files-${data.aws_caller_identity.current.account_id}-${var.suffix}"
   force_destroy = true
   tags = {
     Name        = "Do not delete Bucket"
@@ -546,7 +592,7 @@ variable "monthly_budget_limit_usd" {
 }
 
 resource "aws_budgets_budget" "awsgoat_module_2_monthly_cost" {
-  name         = "awsgoat-module-2-monthly-cost"
+  name         = "awsgoat-module-2-monthly-cost-${var.suffix}"
   budget_type  = "COST"
   limit_amount = var.monthly_budget_limit_usd
   limit_unit   = "USD"

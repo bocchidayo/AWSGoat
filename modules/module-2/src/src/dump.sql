@@ -238,22 +238,22 @@ VALUES(
     '1',
     '2022-10-01',
     '5',
-    '..//documents/payslips/38343834353753616c6172792d506179736c69702e706466.pdf'
+    'payslips/38343834353753616c6172792d506179736c69702e706466.pdf'
 ),(
     '2',
     '2022-10-01',
     '4',
-    '..//documents/payslips/48343834353753616c6172792d506179736c69702e706466.pdf'
+    'payslips/48343834353753616c6172792d506179736c69702e706466.pdf'
 ),(
     '3',
     '2022-10-01',
     '3',
-    '..//documents/payslips/58343834353753616c6172792d506179736c69702e706466.pdf'
+    'payslips/58343834353753616c6172792d506179736c69702e706466.pdf'
 ),(
     '4',
     '2022-10-01',
     '2',
-    '..//documents/payslips/68343834353753616c6172792d506179736c69702e706466.pdf'
+    'payslips/68343834353753616c6172792d506179736c69702e706466.pdf'
 );
 
 
@@ -408,7 +408,7 @@ VALUES(
     'Pending',
     '2022-09-02',
     '0',
-    '..//documents/reimbursments/78343834353753616c6172792d506179736c69702e706466.pdf'
+    'reimbursments/78343834353753616c6172792d506179736c69702e706466.pdf'
 );
 
 INSERT INTO `reimbursments`(
@@ -431,7 +431,7 @@ VALUES(
     'Pending',
     '2022-09-10',
     '0',
-    '..//documents/reimbursments/88343834353753616c6172792d506179736c69702e706466.pdf'
+    'reimbursments/88343834353753616c6172792d506179736c69702e706466.pdf'
 );
 
 INSERT INTO `reimbursments`(
@@ -454,7 +454,7 @@ VALUES(
     'Pending',
     '2022-09-10',
     '1',
-    '..//documents/reimbursments/98343834353753616c6172792d506179736c69702e706466.pdf'
+    'reimbursments/98343834353753616c6172792d506179736c69702e706466.pdf'
 );
 
 INSERT INTO `reimbursments`(
@@ -477,7 +477,7 @@ VALUES(
     'Pending',
     '2022-09-10',
     '1',
-    '..//documents/reimbursments/18343834353753616c6172792d506179736c69702e706466.pdf'
+    'reimbursments/18343834353753616c6172792d506179736c69702e706466.pdf'
 );
 
 INSERT INTO `reimbursments`(

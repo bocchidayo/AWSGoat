@@ -11,28 +11,32 @@
             {
               "name": "RDS_ENDPOINT",
               "value": "RDS_ENDPOINT_VALUE"
+            },
+            {
+              "name": "DB_USERNAME",
+              "value": "root"
+            }
+        ],
+        "secrets": [
+            {
+              "name": "DB_PASSWORD",
+              "valueFrom": "RDS_SECRET_ARN_VALUE:password::"
             }
         ],
         "linuxParameters": {
-            "capabilities": {
-                "add": [
-                    "SYS_PTRACE"
-                ]
-            },
             "initProcessEnabled": true
         },
-        "cpu": 0,
-        "image": "public.ecr.aws/p3q0v3y2/aws-goat-m2:latest",
-        "name": "aws-goat-m2",
-        "mountPoints": [
-            {
-                "sourceVolume": "modules",
-                "containerPath": "/lib/modules"
-            },
-            {
-                "sourceVolume": "kernels",
-                "containerPath": "/usr/src/kernels"
+        "logConfiguration": {
+            "logDriver": "awslogs",
+            "options": {
+                "awslogs-group": "ECS_LOGGROUP_VALUE",
+                "awslogs-region": "us-east-1",
+                "awslogs-stream-prefix": "ecs",
+                "awslogs-create-group": "true"
             }
-        ]
+        },
+        "cpu": 0,
+        "image": "ECS_IMAGE_VALUE",
+        "name": "aws-goat-m2"
     }
 ]

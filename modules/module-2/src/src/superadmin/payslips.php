@@ -55,16 +55,13 @@ if (isset($_POST['submit'])) {
         exit;
     }
 } else if (isset($_REQUEST['request'])) {
+    // Remediation (RT-04/RT-07): see admin/payslips.php for rationale.
     if( $_FILES['file']['name'] != "" ) {
-        $currentDirectory = getcwd();
-        $uploadDirectory = "/documents/payslips/" ;
-
-        $salt = rand(1, 999999);
-        $temp= explode('.',$_FILES['file']['name']);
-        $extension = end($temp);
-        $fileName = bin2hex("$salt" . $_FILES['file']['name']) . "." . "$extension";
-       
-        $uploadPath = $_SERVER['DOCUMENT_ROOT'] .  $uploadDirectory .  basename($fileName);
+        $fileName = safe_upload_filename($_FILES['file']['tmp_name']);
+        if ($fileName === false) {
+            die("Unsupported file type!");
+        }
+        $uploadPath = "/var/www/documents/payslips/" . $fileName;
         move_uploaded_file( $_FILES['file']['tmp_name'],$uploadPath) or die( "Could not copy file!");
     }
     else {
@@ -72,7 +69,7 @@ if (isset($_POST['submit'])) {
     }
     $remname = $_REQUEST['remname'];
     $date = $_REQUEST['date'];
-    $filepath = "../" . $uploadDirectory .  basename($fileName);
+    $filepath = "payslips/" . $fileName;
 
     if ((!empty($remname)) && (!empty($date)) && (!empty($filepath)) ) {
         $queryreminsert = "INSERT INTO `payslips` (`id`,`date`, `file`) VALUES('$remname','$date','$filepath')";
@@ -413,8 +410,8 @@ if (isset($_POST['submit'])) {
                                                 echo "<tr>
                                                     <td>" . date_format($date1,"Y F") . "</td>
                                                     <td>" . $remrow['payslip_id'] . "</td>
-                                                    <td><a href=" . $remrow["file"] . " target='_blank'>
-                                                    <button class='btn btn-primary' type='button'>View File</button></a></td>                
+                                                    <td><a href=\"../download.php?f=" . urlencode($remrow["file"]) . "\" target='_blank'>
+                                                    <button class='btn btn-primary' type='button'>View File</button></a></td>
                                                 </tr>";
                                             }
                                             ?>
