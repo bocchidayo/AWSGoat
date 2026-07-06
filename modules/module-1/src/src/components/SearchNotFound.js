@@ -11,8 +11,12 @@ SearchNotFound.propTypes = {
 export default function SearchNotFound({ searchQuery = '', ...other }) {
   return (
     <Paper {...other}>
-      {// eslint-disable-next-line
-      <p style={{ textAlign: 'center' }}>Results for <strong dangerouslySetInnerHTML={{ __html: searchQuery }}/></p>}
+      {/* Remediation (Reflected XSS): the search query used to be rendered via
+          dangerouslySetInnerHTML with no sanitization (attack-manuals/module-1/
+          01-Reflected XSS.md - <img src=a onerror=alert('xss')> in the search
+          bar). A search query has no legitimate reason to contain HTML, so it
+          is rendered as plain text instead - React escapes it automatically. */}
+      <p style={{ textAlign: 'center' }}>Results for <strong>{searchQuery}</strong></p>
     </Paper>
   );
 }

@@ -532,24 +532,29 @@ def lambda_handler(event, context):
             name = data["value"]
             authLevel = callerAuthLevel
             try:
+                # Remediation (PartiQL injection): "name" used to be concatenated
+                # directly into the statement (attack-manuals/module-1/02-SQL
+                # Injection.md - payload "value":"hello' or '1'='1" against this
+                # exact endpoint). PartiQL's native "?" + Parameters binding is
+                # used instead so the value is never parsed as query syntax.
                 if authLevel == "200":
                     exec_statement = (
-                        'SELECT * FROM "' + userTable + '" where name = \''
-                        + name
-                        + "' and authLevel in ('200','100');"
+                        'SELECT * FROM "' + userTable + '" where name = ? '
+                        + "and authLevel in ('200','100');"
                     )
                 elif authLevel == "100":
                     exec_statement = (
-                        'SELECT * FROM "' + userTable + '" where name = \''
-                        + name
-                        + "' and authLevel in ('200','100','0');"
+                        'SELECT * FROM "' + userTable + '" where name = ? '
+                        + "and authLevel in ('200','100','0');"
                     )
                 else:
                     exec_statement = (
-                        'SELECT * FROM "' + userTable + '" where name = \'' + name + "';"
+                        'SELECT * FROM "' + userTable + '" where name = ?;'
                     )
 
-                responses = client.execute_statement(Statement=exec_statement)
+                responses = client.execute_statement(
+                    Statement=exec_statement, Parameters=[{"S": name}]
+                )
                 if responses["Items"] != {}:
                     for item in responses["Items"]:
                         if "email" in item:

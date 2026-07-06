@@ -40,7 +40,7 @@ data "archive_file" "lambda_zip" {
   type        = "zip"
   source_dir  = "resources/lambda/react"
   output_path = "resources/lambda/out/reactapp.zip"
-  depends_on  = [aws_s3_object.upload_folder_prod]
+  depends_on  = [aws_s3_object.upload_folder_prod, null_resource.file_replacement_lambda_react]
 }
 
 resource "aws_lambda_function" "react_lambda_app" {
@@ -49,7 +49,13 @@ resource "aws_lambda_function" "react_lambda_app" {
   handler       = "index.handler"
   runtime       = "nodejs18.x"
   role          = aws_iam_role.blog_app_lambda.arn
-  depends_on    = [data.archive_file.lambda_zip, null_resource.file_replacement_lambda_react]
+  # Bugfix: without source_code_hash, Terraform has no way to detect the zip's
+  # *content* changed on a re-apply (only the filename string, which never
+  # changes) - so code edits silently never reached the deployed function
+  # after the first apply. Discovered when a later fix to lambda_function.py
+  # (the sibling data-lambda below) didn't take effect on redeploy.
+  source_code_hash = data.archive_file.lambda_zip.output_base64sha256
+  depends_on        = [data.archive_file.lambda_zip, null_resource.file_replacement_lambda_react]
 }
 
 
@@ -3179,7 +3185,13 @@ resource "aws_lambda_function" "lambda_ba_data" {
   handler       = "lambda_function.lambda_handler"
   runtime       = "python3.9"
   role          = aws_iam_role.blog_app_lambda_python.arn
-  depends_on    = [data.archive_file.lambda_zip_bap]
+  # Bugfix: without source_code_hash, Terraform never notices this zip's
+  # *content* changed on a re-apply (only compares the filename string), so
+  # code fixes to lambda_function.py silently never reached the deployed
+  # function after the very first apply - confirmed live: the PartiQL-
+  # injection fix in /search-author had no effect until this was added.
+  source_code_hash = data.archive_file.lambda_zip_bap.output_base64sha256
+  depends_on        = [data.archive_file.lambda_zip_bap]
   layers        = [aws_lambda_layer_version.lambda_layer.arn]
   memory_size   = "256"
   environment {
@@ -3608,66 +3620,27 @@ resource "aws_iam_role" "goat_role" {
 }
 EOF
 }
-resource "aws_iam_role_policy_attachment" "goat_s3_policy" {
-  role       = aws_iam_role.goat_role.name
-  policy_arn = "arn:aws:iam::aws:policy/AmazonS3FullAccess"
-}
-
-
-resource "aws_iam_role_policy_attachment" "goat_policy" {
-  role       = aws_iam_role.goat_role.name
-  policy_arn = aws_iam_policy.goat_inline_policy_2.arn
-}
-
-resource "aws_iam_policy" "goat_inline_policy_2" {
-  name = "dev-ec2-lambda-policies-${var.suffix}"
+# Remediation (IAM Privilege Escalation, attack-manuals/module-1/07-IAM
+# Privilege Escalation.md): this role previously had AmazonS3FullAccess
+# (account-wide S3 admin) plus a custom policy ("dev-ec2-lambda-policies")
+# granting iam:CreatePolicy + iam:AttachRolePolicy scoped to the Lambda's own
+# role. Combined, those two actions let anyone with this instance's
+# credentials mint a brand-new "Action:*, Resource:*" policy and attach it to
+# blog_app_lambda_data - after which any Lambda-role credentials obtained via
+# SSRF (see download_url() fix) would have full admin. Neither goat_user_data
+# .tpl (S3 bootstrap of this one temp bucket) nor anything else this instance
+# legitimately does requires S3 admin or any IAM write action, so both are
+# replaced with a policy scoped to exactly the bootstrap bucket, read-only.
+resource "aws_iam_role_policy" "goat_scoped_s3_policy" {
+  name = "goat-instance-s3-bootstrap-${var.suffix}"
+  role = aws_iam_role.goat_role.id
   policy = jsonencode({
-    "Statement" : [
-      {
-        "Action" : [
-          "lambda:UpdateFunctionCode",
-          "lambda:UpdateFunctionEventInvokeConfig",
-          "lambda:AddPermission",
-          "lambda:InvokeFunction",
-          "lambda:GetLayerVersion",
-          "lambda:ListVersionsByFunction",
-          "lambda:UpdateFunctionConfiguration",
-          "lambda:GetFunctionConfiguration",
-          "lambda:GetLayerVersionPolicy",
-          "lambda:GetPolicy",
-          "iam:AttachRolePolicy"
-        ],
-        "Effect" : "Allow",
-        "Resource" : ["${aws_lambda_function.lambda_ba_data.arn}", "${aws_iam_role.blog_app_lambda_python.arn}"],
-        "Sid" : "Pol0"
-      },
-      {
-        "Action" : [
-          "iam:ListPolicies",
-          "iam:GetRole",
-          "iam:GetPolicyVersion",
-          "lambda:ListFunctions",
-          "iam:GetInstanceProfile",
-          "iam:GetPolicy",
-          "iam:ListRoles",
-          "iam:ListInstanceProfileTags",
-          "iam:ListInstanceProfiles",
-          "iam:CreatePolicy",
-          "iam:ListInstanceProfilesForRole",
-          "iam:PassRole",
-          "iam:ListPolicyVersions",
-          "iam:ListAttachedRolePolicies",
-          "lambda:ListLayerVersions",
-          "iam:UpdateRole",
-          "iam:ListRolePolicies",
-          "iam:GetRolePolicy"
-        ],
-        "Effect" : "Allow",
-        "Resource" : "*",
-        "Sid" : "Pol1"
-      }
-    ],
-    "Version" : "2012-10-17"
+    Version = "2012-10-17"
+    Statement = [{
+      Effect   = "Allow"
+      Action   = ["s3:GetObject", "s3:ListBucket", "s3:DeleteObject", "s3:DeleteBucket"]
+      Resource = [aws_s3_bucket.bucket_temp.arn, "${aws_s3_bucket.bucket_temp.arn}/*"]
+    }]
   })
 }
 
@@ -3781,10 +3754,10 @@ resource "null_resource" "file_replacement_lambda_data" {
 resource "null_resource" "file_replacement_api_gw" {
   provisioner "local-exec" {
     command     = <<EOF
-sed -i "s,API_GATEWAY_URL,${aws_api_gateway_deployment.apideploy_ba.invoke_url},g" resources/s3/webfiles/build/static/js/main.e5839717.js
-sed -i "s,API_GATEWAY_URL,${aws_api_gateway_deployment.apideploy_ba.invoke_url},g" resources/s3/webfiles/build/static/js/main.e5839717.js.map
-sed -i 's/"\/static/"https:\/\/${aws_s3_bucket.bucket_upload.bucket}\.s3\.amazonaws\.com\/build\/static/g' resources/s3/webfiles/build/static/js/main.e5839717.js
-sed -i 's/n.p+"static/"https:\/\/${aws_s3_bucket.bucket_upload.bucket}\.s3\.amazonaws\.com\/build\/static/g' resources/s3/webfiles/build/static/js/main.e5839717.js
+sed -i "s,API_GATEWAY_URL,${aws_api_gateway_deployment.apideploy_ba.invoke_url},g" resources/s3/webfiles/build/static/js/main.f99443ae.js
+sed -i "s,API_GATEWAY_URL,${aws_api_gateway_deployment.apideploy_ba.invoke_url},g" resources/s3/webfiles/build/static/js/main.f99443ae.js.map
+sed -i 's/"\/static/"https:\/\/${aws_s3_bucket.bucket_upload.bucket}\.s3\.amazonaws\.com\/build\/static/g' resources/s3/webfiles/build/static/js/main.f99443ae.js
+sed -i 's/n.p+"static/"https:\/\/${aws_s3_bucket.bucket_upload.bucket}\.s3\.amazonaws\.com\/build\/static/g' resources/s3/webfiles/build/static/js/main.f99443ae.js
 EOF
     interpreter = ["/bin/bash", "-c"]
   }
@@ -3797,8 +3770,8 @@ EOF
 resource "null_resource" "file_replacement_api_gw_cleanup" {
   provisioner "local-exec" {
     command     = <<EOF
-sed -i "s,${aws_api_gateway_deployment.apideploy_ba.invoke_url},API_GATEWAY_URL,g" resources/s3/webfiles/build/static/js/main.e5839717.js
-sed -i "s,${aws_api_gateway_deployment.apideploy_ba.invoke_url},API_GATEWAY_URL,g" resources/s3/webfiles/build/static/js/main.e5839717.js.map
+sed -i "s,${aws_api_gateway_deployment.apideploy_ba.invoke_url},API_GATEWAY_URL,g" resources/s3/webfiles/build/static/js/main.f99443ae.js
+sed -i "s,${aws_api_gateway_deployment.apideploy_ba.invoke_url},API_GATEWAY_URL,g" resources/s3/webfiles/build/static/js/main.f99443ae.js.map
 sed -i 's/${aws_instance.goat_instance.public_ip}/EC2_IP_ADDR/g' resources/s3/shared/shared/files/.ssh/config.txt
 EOF
     interpreter = ["/bin/bash", "-c"]

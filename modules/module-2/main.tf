@@ -217,10 +217,18 @@ resource "aws_iam_role_policy_attachment" "ecs-instance-role-attachment-1" {
   role       = aws_iam_role.ecs-instance-role.name
   policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role"
 }
-resource "aws_iam_role_policy_attachment" "ecs-instance-role-attachment-2" {
-  role       = aws_iam_role.ecs-instance-role.name
-  policy_arn = "arn:aws:iam::aws:policy/IAMFullAccess"
-}
+# Remediation (IAM Privilege Escalation, attack-manuals/module-2/04-IAM
+# Privilege Escalation.md): this role previously had the AWS-managed
+# IAMFullAccess policy plus a boundary that allowed ec2:RunInstances +
+# iam:PassRole - which let anyone with this instance's credentials launch a
+# new EC2 instance, pass it the unrelated "ec2Deployer-role" (which had
+# "Action:*, Resource:*"), and use that instance's credentials to create an
+# IAM admin user. An ECS container-instance host has no legitimate need for
+# IAM write access, to launch other instances, or to pass any role, so
+# IAMFullAccess is removed and the custom policy/boundary below no longer
+# grant either. The escalation-target role/policy (ec2Deployer-role /
+# ec2DeployerAdmin-policy), which nothing else in this stack ever references,
+# is removed outright rather than "scoped down" since it serves no purpose.
 
 resource "aws_iam_role_policy_attachment" "ecs-instance-role-attachment-3" {
   role       = aws_iam_role.ecs-instance-role.name
@@ -233,9 +241,6 @@ resource "aws_iam_policy" "ecs_instance_policy" {
     "Statement" : [
       {
         "Action" : [
-          "ssm:*",
-          "ssmmessages:*",
-          "ec2:RunInstances",
           "ec2:Describe*"
         ],
         "Effect" : "Allow",
@@ -255,11 +260,8 @@ resource "aws_iam_policy" "instance_boundary_policy" {
         "Action" : [
           "iam:List*",
           "iam:Get*",
-          "iam:PassRole",
-          "iam:PutRole*",
           "ssm:*",
           "ssmmessages:*",
-          "ec2:RunInstances",
           "ec2:Describe*",
           "ecs:*",
           "ecr:*",
@@ -273,51 +275,6 @@ resource "aws_iam_policy" "instance_boundary_policy" {
     ],
     "Version" : "2012-10-17"
   })
-}
-
-resource "aws_iam_instance_profile" "ec2-deployer-profile" {
-  name = "ec2Deployer-${var.suffix}"
-  path = "/"
-  role = aws_iam_role.ec2-deployer-role.id
-}
-resource "aws_iam_role" "ec2-deployer-role" {
-  name = "ec2Deployer-role-${var.suffix}"
-  path = "/"
-  assume_role_policy = jsonencode({
-    "Version" : "2008-10-17",
-    "Statement" : [
-      {
-        "Sid" : "",
-        "Effect" : "Allow",
-        "Principal" : {
-          "Service" : "ec2.amazonaws.com"
-        },
-        "Action" : "sts:AssumeRole"
-      }
-    ]
-  })
-}
-
-resource "aws_iam_policy" "ec2_deployer_admin_policy" {
-  name = "ec2DeployerAdmin-policy-${var.suffix}"
-  policy = jsonencode({
-    "Statement" : [
-      {
-        "Action" : [
-          "*"
-        ],
-        "Effect" : "Allow",
-        "Resource" : "*",
-        "Sid" : "Policy1"
-      }
-    ],
-    "Version" : "2012-10-17"
-  })
-}
-
-resource "aws_iam_role_policy_attachment" "ec2-deployer-role-attachment" {
-  role       = aws_iam_role.ec2-deployer-role.name
-  policy_arn = aws_iam_policy.ec2_deployer_admin_policy.arn
 }
 
 resource "aws_iam_instance_profile" "ecs-instance-profile" {
